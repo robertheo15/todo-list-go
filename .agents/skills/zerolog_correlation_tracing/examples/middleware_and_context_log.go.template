@@ -1,0 +1,99 @@
+package examples
+
+/*
+===============================================================================
+TEMPLATE: Zerolog Correlation & Request Tracing Scaffolding
+Use this template when setting up distributed tracing, context-scoped loggers,
+and correlation middleware in Go HTTP applications.
+===============================================================================
+*/
+
+import (
+	"context"
+	"net/http"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
+)
+
+// ============================================================================
+// 1. LOGGER INITIALIZER
+// ============================================================================
+func InitStructuredLogger(logDir string, logFileName string) {
+	zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	zerolog.TimeFieldFormat = time.RFC3339
+
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		panic("failed to create log directory: " + err.Error())
+	}
+
+	logFile, err := os.OpenFile(filepath.Join(logDir, logFileName), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		panic("failed to open log file: " + err.Error())
+	}
+
+	multi := zerolog.MultiLevelWriter(os.Stdout, logFile)
+	log.Logger = zerolog.New(multi).With().Timestamp().Logger()
+	zerolog.DefaultContextLogger = &log.Logger
+}
+
+// ============================================================================
+// 2. CORRELATION MIDDLEWARE
+// ============================================================================
+func TracingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		reqID := r.Header.Get("X-Request-ID")
+		if reqID == "" {
+			reqID = uuid.New().String()
+		}
+
+		w.Header().Set("X-Request-ID", reqID)
+
+		reqLogger := log.With().
+			Str("request_id", reqID).
+			Str("method", r.Method).
+			Str("path", r.URL.Path).
+			Logger()
+
+		ctx := reqLogger.WithContext(r.Context())
+
+		reqLogger.Debug().
+			Str("func", "TracingMiddleware").
+			Str("remote_addr", r.RemoteAddr).
+			Msg("incoming request started")
+
+		next.ServeHTTP(w, r.WithContext(ctx))
+
+		reqLogger.Info().
+			Str("func", "TracingMiddleware").
+			Dur("duration_ms", time.Since(start)).
+			Msg("incoming request completed")
+	})
+}
+
+// ============================================================================
+// 3. CONTEXT-AWARE WORKER & SERVICE METHODS
+// ============================================================================
+func TracedWorkerOperation(ctx context.Context, itemID string) error {
+	// Automatically pulls logger containing request_id from ctx
+	logger := log.Ctx(ctx).With().Str("func", "TracedWorkerOperation").Logger()
+
+	logger.Debug().Str("item_id", itemID).Msg("executing worker task")
+
+	// Simulating background task with context propagation
+	childCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	return subTaskOperation(childCtx, itemID)
+}
+
+func subTaskOperation(ctx context.Context, itemID string) error {
+	logger := log.Ctx(ctx).With().Str("func", "subTaskOperation").Logger()
+	logger.Debug().Str("item_id", itemID).Msg("sub-task step active")
+	return nil
+}

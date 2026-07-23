@@ -1,0 +1,98 @@
+package examples
+
+/*
+===============================================================================
+TEMPLATE: Concurrent Fan-Out / Fan-In Worker Scaffolding
+Use this template when polling multiple external HTTP endpoints concurrently
+and capturing the first successful response without race conditions or leaks.
+===============================================================================
+*/
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/rs/zerolog/log"
+)
+
+type ExternalResult struct {
+	Source  string
+	Payload interface{}
+}
+
+type WorkerFunc func(ctx context.Context, query string) (*ExternalResult, error)
+
+func ExecuteConcurrentPolling(ctx context.Context, query string, workers []WorkerFunc) (*ExternalResult, error) {
+	logger := log.Ctx(ctx).With().Str("func", "ExecuteConcurrentPolling").Logger()
+	logger.Debug().Int("worker_count", len(workers)).Str("query", query).Msg("spawning concurrent polling workers")
+
+	if len(workers) == 0 {
+		return nil, errors.New("no workers configured for polling")
+	}
+
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	resultCh := make(chan *ExternalResult, len(workers))
+	errorCh := make(chan error, len(workers))
+
+	for _, wFunc := range workers {
+		wg.Add(1)
+		go func(fn WorkerFunc) {
+			defer wg.Done()
+			if res, err := fn(ctx, query); err != nil {
+				errorCh <- err
+			} else {
+				resultCh <- res
+			}
+		}(wFunc)
+	}
+
+	go func() {
+		wg.Wait()
+		close(resultCh)
+		close(errorCh)
+	}()
+
+	return collectFirstSuccess(ctx, len(workers), resultCh, errorCh)
+}
+
+func collectFirstSuccess(
+	ctx context.Context,
+	totalWorkers int,
+	resultCh <-chan *ExternalResult,
+	errorCh <-chan error,
+) (*ExternalResult, error) {
+	logger := log.Ctx(ctx).With().Str("func", "collectFirstSuccess").Logger()
+	var errorsList []error
+	receivedCount := 0
+
+	for receivedCount < totalWorkers {
+		select {
+		case res, ok := <-resultCh:
+			if ok && res != nil {
+				logger.Info().Str("source", res.Source).Msg("worker succeeded; accepting first result")
+				return res, nil
+			}
+		case err, ok := <-errorCh:
+			if ok && err != nil {
+				logger.Warn().Err(err).Msg("worker failed with error")
+				errorsList = append(errorsList, err)
+			}
+		case <-ctx.Done():
+			logger.Error().Msg("timeout exceeded during concurrent polling")
+			return nil, fmt.Errorf("concurrent polling timed out: %w", ctx.Err())
+		}
+		receivedCount++
+	}
+
+	if len(errorsList) > 0 {
+		return nil, fmt.Errorf("all %d workers failed; first error: %w", totalWorkers, errorsList[0])
+	}
+
+	return nil, errors.New("all workers exited without producing a result")
+}

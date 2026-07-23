@@ -1,0 +1,87 @@
+package examples
+
+/*
+===============================================================================
+TEMPLATE: Resilient Redis Repository Implementation
+Use this template when implementing generic TTL caching repositories in Go using
+github.com/go-redis/redis/v8.
+===============================================================================
+*/
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/go-redis/redis/v8"
+)
+
+type CacheRepository interface {
+	Get(ctx context.Context, key string, dest interface{}) error
+	Set(ctx context.Context, key string, val interface{}, ttl time.Duration) error
+	Delete(ctx context.Context, key string) error
+}
+
+type redisCacheRepository struct {
+	client    *redis.Client
+	namespace string
+}
+
+func NewRedisCacheRepository(client *redis.Client, namespace string) CacheRepository {
+	return &redisCacheRepository{
+		client:    client,
+		namespace: strings.TrimSuffix(namespace, ":"),
+	}
+}
+
+func (r *redisCacheRepository) formatKey(rawKey string) string {
+	clean := strings.ToLower(strings.TrimSpace(rawKey))
+	if r.namespace == "" {
+		return clean
+	}
+	return fmt.Sprintf("%s:%s", r.namespace, clean)
+}
+
+func (r *redisCacheRepository) Get(ctx context.Context, key string, dest interface{}) error {
+	fullKey := r.formatKey(key)
+
+	payload, err := r.client.Get(ctx, fullKey).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return redis.Nil // Preserve redis.Nil for exact errors.Is() checks
+		}
+		return fmt.Errorf("redis.Get key=%s: %w", fullKey, err)
+	}
+
+	if err := json.Unmarshal([]byte(payload), dest); err != nil {
+		return fmt.Errorf("redis unmarshal key=%s: %w", fullKey, err)
+	}
+
+	return nil
+}
+
+func (r *redisCacheRepository) Set(ctx context.Context, key string, val interface{}, ttl time.Duration) error {
+	fullKey := r.formatKey(key)
+
+	payload, err := json.Marshal(val)
+	if err != nil {
+		return fmt.Errorf("redis marshal key=%s: %w", fullKey, err)
+	}
+
+	if err := r.client.Set(ctx, fullKey, payload, ttl).Err(); err != nil {
+		return fmt.Errorf("redis.Set key=%s ttl=%v: %w", fullKey, ttl, err)
+	}
+
+	return nil
+}
+
+func (r *redisCacheRepository) Delete(ctx context.Context, key string) error {
+	fullKey := r.formatKey(key)
+	if err := r.client.Del(ctx, fullKey).Err(); err != nil {
+		return fmt.Errorf("redis.Del key=%s: %w", fullKey, err)
+	}
+	return nil
+}

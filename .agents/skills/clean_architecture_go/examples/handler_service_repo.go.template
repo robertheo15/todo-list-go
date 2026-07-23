@@ -1,0 +1,151 @@
+package examples
+
+/*
+===============================================================================
+TEMPLATE: Clean Architecture Feature Scaffolding
+Use this template when implementing a new domain feature across the 4 layers:
+Model -> Repository -> Service -> HTTP Handler
+===============================================================================
+*/
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/go-redis/redis/v8"
+	"github.com/rs/zerolog/log"
+)
+
+// ============================================================================
+// 1. DOMAIN MODEL (internal/models/example_model.go)
+// ============================================================================
+type ExampleDomainModel struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Value     int    `json:"value"`
+	Cached    bool   `json:"cached"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+// ============================================================================
+// 2. REPOSITORY LAYER (internal/repository/example_repository.go)
+// ============================================================================
+type ExampleRepository interface {
+	GetExample(ctx context.Context, key string) (*ExampleDomainModel, error)
+	SetExample(ctx context.Context, key string, data *ExampleDomainModel) error
+}
+
+type redisExampleRepository struct {
+	client *redis.Client
+}
+
+func NewRedisExampleRepository(client *redis.Client) ExampleRepository {
+	return &redisExampleRepository{client: client}
+}
+
+func (r *redisExampleRepository) GetExample(ctx context.Context, key string) (*ExampleDomainModel, error) {
+	normKey := fmt.Sprintf("example:%s", strings.ToLower(key))
+	val, err := r.client.Get(ctx, normKey).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return nil, nil // Cache miss
+		}
+		return nil, fmt.Errorf("redis.Get key=%s: %w", normKey, err)
+	}
+
+	var model ExampleDomainModel
+	if err := json.Unmarshal([]byte(val), &model); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal cache item: %w", err)
+	}
+	model.Cached = true
+	return &model, nil
+}
+
+func (r *redisExampleRepository) SetExample(ctx context.Context, key string, data *ExampleDomainModel) error {
+	normKey := fmt.Sprintf("example:%s", strings.ToLower(key))
+	payload, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Errorf("failed to marshal cache item: %w", err)
+	}
+	return r.client.Set(ctx, normKey, payload, 12*time.Hour).Err()
+}
+
+// ============================================================================
+// 3. SERVICE LAYER (internal/service/example_service.go)
+// ============================================================================
+type ExampleService struct {
+	repo ExampleRepository
+}
+
+func NewExampleService(repo ExampleRepository) *ExampleService {
+	return &ExampleService{repo: repo}
+}
+
+func (s *ExampleService) FetchOrGenerateExample(ctx context.Context, id string) (*ExampleDomainModel, error) {
+	logger := log.Ctx(ctx).With().Str("func", "FetchOrGenerateExample").Logger()
+	logger.Debug().Str("id", id).Msg("checking example cache")
+
+	cached, err := s.repo.GetExample(ctx, id)
+	if err != nil {
+		logger.Error().Err(err).Msg("cache lookup failed; proceeding with generation")
+	} else if cached != nil {
+		logger.Info().Str("id", id).Msg("cache hit for example item")
+		return cached, nil
+	}
+
+	logger.Info().Str("id", id).Msg("cache miss; generating new item")
+	model := &ExampleDomainModel{
+		ID:        id,
+		Name:      fmt.Sprintf("Item-%s", id),
+		Value:     42,
+		Cached:    false,
+		UpdatedAt: time.Now().Format(time.RFC3339),
+	}
+
+	if err := s.repo.SetExample(ctx, id, model); err != nil {
+		logger.Error().Err(err).Msg("failed to cache generated example")
+	}
+
+	return model, nil
+}
+
+// ============================================================================
+// 4. HTTP HANDLER LAYER (internal/http/example_handler.go)
+// ============================================================================
+// Assuming Server struct has `exampleService *ExampleService`
+func HandleGetExample(w http.ResponseWriter, r *http.Request, svc *ExampleService) {
+	logger := log.Ctx(r.Context()).With().Str("func", "HandleGetExample").Logger()
+
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		logger.Warn().Msg("missing required id parameter")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"id query parameter is required"}`))
+		return
+	}
+
+	result, err := svc.FetchOrGenerateExample(r.Context(), id)
+	if err != nil {
+		logger.Error().Err(err).Str("id", id).Msg("failed to fetch example")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"Internal Server Error"}`))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	payload, _ := json.Marshal(map[string]interface{}{
+		"message": "Example fetched successfully",
+		"success": true,
+		"status":  "OK",
+		"data":    result,
+	})
+	w.Write(payload)
+}

@@ -1,0 +1,173 @@
+package service_test
+
+/*
+===============================================================================
+TEMPLATE: Service Layer Table-Driven & Concurrent Unit Test Scaffolding
+Use this template when implementing or expanding unit test suites covering
+internal/service in Go 1.25. Enforces httptest API mocking, context tracing,
+and -race compliance.
+===============================================================================
+*/
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"weather-api/internal/models"
+	"weather-api/internal/service"
+
+	"github.com/rs/zerolog"
+)
+
+// setupTestContext injects a zerolog test logger into a fresh background context.
+func setupTestContext(t *testing.T) context.Context {
+	t.Helper()
+	logger := zerolog.New(zerolog.NewTestWriter(t)).With().Timestamp().Logger()
+	return logger.WithContext(context.Background())
+}
+
+// ============================================================================
+// 1. TESTING EXTERNAL API FETCHER (GetOpenWeatherAPI)
+// ============================================================================
+func TestService_GetOpenWeatherAPI(t *testing.T) {
+	testCases := []struct {
+		name        string
+		city        string
+		envSetup    func(mockURL string)
+		mockHandler http.HandlerFunc
+		expectedErr error
+		checkResult func(t *testing.T, res *models.WeatherModel)
+	}{
+		{
+			name: "Success - 200 OK Valid Weather Payload",
+			city: "jakarta",
+			envSetup: func(mockURL string) {
+				t.Setenv("OPENWEATHER_API", mockURL)
+				t.Setenv("OPENWEATHERMAP_KEY", "mock-secret-key")
+			},
+			mockHandler: func(w http.ResponseWriter, r *http.Request) {
+				// Assert query parameters
+				query := r.URL.Query()
+				if query.Get("q") != "jakarta" || query.Get("appid") != "mock-secret-key" {
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(`{
+					"name": "Jakarta",
+					"main": {"temp": 304.65, "humidity": 75},
+					"weather": [{"main": "Clouds", "description": "scattered clouds"}]
+				}`))
+			},
+			expectedErr: nil,
+			checkResult: func(t *testing.T, res *models.WeatherModel) {
+				if res == nil {
+					t.Fatal("expected non-nil result")
+				}
+				if res.City != "Jakarta" {
+					t.Errorf("expected City Jakarta, got %s", res.City)
+				}
+				if res.Temperature != 32.0 {
+					t.Errorf("expected Temperature 32.0, got %f", res.Temperature)
+				}
+			},
+		},
+		{
+			name: "Failure - 404 Not Found (Invalid City)",
+			city: "nonexistent_city",
+			envSetup: func(mockURL string) {
+				t.Setenv("OPENWEATHER_API", mockURL)
+				t.Setenv("OPENWEATHERMAP_KEY", "mock-secret-key")
+			},
+			mockHandler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+				w.Write([]byte(`{"cod":"404","message":"city not found"}`))
+			},
+			expectedErr: service.ErrInvalidCity,
+		},
+		{
+			name: "Failure - 500 Internal Server Error",
+			city: "london",
+			envSetup: func(mockURL string) {
+				t.Setenv("OPENWEATHER_API", mockURL)
+				t.Setenv("OPENWEATHERMAP_KEY", "mock-secret-key")
+			},
+			mockHandler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(`Internal Server Error`))
+			},
+			expectedErr: service.ErrAPIDown,
+		},
+		{
+			name: "Failure - Missing Environment Variables",
+			city: "tokyo",
+			envSetup: func(mockURL string) {
+				t.Setenv("OPENWEATHER_API", "")
+				t.Setenv("OPENWEATHERMAP_KEY", "")
+			},
+			mockHandler: func(w http.ResponseWriter, r *http.Request) {},
+			expectedErr: service.ErrAPIDown,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			mockServer := httptest.NewServer(tc.mockHandler)
+			defer mockServer.Close()
+
+			tc.envSetup(mockServer.URL)
+			ctx := setupTestContext(t)
+
+			svc := service.NewService(nil)
+			result, err := svc.GetOpenWeatherAPI(ctx, tc.city)
+
+			if tc.expectedErr != nil {
+				if !errors.Is(err, tc.expectedErr) {
+					t.Fatalf("expected error %v, got %v", tc.expectedErr, err)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.checkResult != nil {
+				tc.checkResult(t, result)
+			}
+		})
+	}
+}
+
+// ============================================================================
+// 2. TESTING CONCURRENT FAN-OUT TIMEOUT BEHAVIOR
+// ============================================================================
+func TestService_GetOpenWeatherAPI_Timeout(t *testing.T) {
+	mockHandler := func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(150 * time.Millisecond) // Simulate slow provider response
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"name":"SlowCity"}`))
+	}
+
+	mockServer := httptest.NewServer(http.HandlerFunc(mockHandler))
+	defer mockServer.Close()
+
+	t.Setenv("OPENWEATHER_API", mockServer.URL)
+	t.Setenv("OPENWEATHERMAP_KEY", "mock-key")
+
+	ctx := setupTestContext(t)
+	// Enforce a strict 50ms timeout context that expires before worker finishes
+	shortCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+
+	svc := service.NewService(nil)
+	_, err := svc.GetOpenWeatherAPI(shortCtx, "jakarta")
+
+	if !errors.Is(err, service.ErrAPIDown) && !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected ErrAPIDown or DeadlineExceeded on timeout, got %v", err)
+	}
+}
