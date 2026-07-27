@@ -93,13 +93,32 @@ DB_PATH=todo.db
 
 ---
 
-## 🧪 Running Tests
+## 🧪 Running Tests & Coverage
 
 To run unit tests across all packages:
 
 ```bash
 go test ./...
 ```
+
+### Service Layer Test Coverage Enforcement
+
+Test coverage for the business logic layer (`./internal/service/...`) is strictly required to be **$\ge 75\%$**.
+
+* **Run Coverage Check Locally**:
+  ```bash
+  chmod +x ./scripts/check_service_coverage.sh
+  ./scripts/check_service_coverage.sh
+  ```
+
+* **Percentage Only Command**:
+  ```bash
+  go test -coverprofile=coverage.out ./internal/service/... > /dev/null && go tool cover -func=coverage.out | grep total | awk '{print $3}'
+  ```
+
+* **Automated PR Enforcement**:
+  A GitHub Actions workflow ([.github/workflows/coverage-check.yml](file:///.github/workflows/coverage-check.yml)) automatically runs on Pull Requests touching `internal/service/**` to ensure coverage meets or exceeds the 75% threshold before code can be merged.
+
 
 ---
 

@@ -1,2 +1,0 @@
-- setup test coverage by percentage % only in service layer
-- setup centralized log 
