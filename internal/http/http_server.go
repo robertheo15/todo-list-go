@@ -33,6 +33,6 @@ func (s *Server) setupRoutes() {
 }
 
 func (s *Server) Router() http.Handler {
-	// Apply Rate Limit Middleware to all routes
-	return s.RateLimitMiddleware(s.mux)
+	// Apply Correlation Logger and Rate Limit Middleware to all routes
+	return CorrelationLoggerMiddleware(s.RateLimitMiddleware(s.mux))
 }
