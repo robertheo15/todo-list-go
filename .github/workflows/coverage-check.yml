@@ -1,0 +1,31 @@
+name: Service Layer Coverage Check
+
+on:
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'internal/service/**'
+      - 'scripts/check_service_coverage.sh'
+      - '.github/workflows/coverage-check.yml'
+
+jobs:
+  coverage-check:
+    name: Enforce >= 75% Coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Install Dependencies
+        run: go mod download
+
+      - name: Run Coverage Verification Script
+        run: |
+          chmod +x ./scripts/check_service_coverage.sh
+          ./scripts/check_service_coverage.sh

@@ -229,14 +229,20 @@ docker-compose logs -f personal-blog-api
 docker-compose down
 ```
 
-### Running Tests & Race Detection
-Always verify code changes for race conditions and compilation errors:
+### Running Tests & Coverage Verification
+Always verify code changes for race conditions, compilation errors, and test coverage requirements:
 ```bash
 # Run unit tests across all packages with data race detector
 go test -v -race ./...
 
 # Run service layer unit tests specifically (with race detector)
 go test -v -race ./internal/service/...
+
+# Check service layer test coverage against 75% threshold
+./scripts/check_service_coverage.sh
+
+# Get exact service layer test coverage percentage
+go test -coverprofile=coverage.out ./internal/service/... > /dev/null && go tool cover -func=coverage.out | grep total | awk '{print $3}'
 
 # Check formatting and syntax
 go vet ./...
@@ -250,6 +256,8 @@ Before completing any prompt or marking a task as done, verify:
 - [ ] **Clean Architecture**: No layer boundary violations (`cmd` vs `http` vs `service` vs `repository`).
 - [ ] **Context Logging**: All touched functions use `log.Ctx(ctx).With().Str("func", "...")` without `fmt.Println`.
 - [ ] **Error Handling**: Errors are wrapped (`%w`) with descriptive context.
+- [ ] **Service Test Coverage Threshold**: `./internal/service/...` maintains $\ge 75\%$ test statement coverage (`./scripts/check_service_coverage.sh` passes).
 - [ ] **Cache Consistency**: Cache keys use `strings.ToLower()`, and TTL is preserved at `12 * time.Hour`.
 - [ ] **Concurrency & Race Checks**: Concurrent code uses `context.Context`, avoids channel deadlocks/polling bugs, and uses atomic/mutex locking on shared data.
 - [ ] **Compilation & Formatting**: Run `go vet ./...` and `go mod tidy` when adding imports or packages.
+
